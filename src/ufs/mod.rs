@@ -270,6 +270,11 @@ impl SuperBlock {
     pub fn lblkno(&self, off: u64) -> u64 {
         off >> self.bshift
     }
+
+    /// Returns the disk block number of a file system block.
+    pub fn fsbtodb(&self, fbno: usize) -> usize {
+        fbno << self.fsbtodb as usize
+    }
 }
 
 /// Reclaim constants
@@ -466,6 +471,16 @@ impl<'a> FileSystem<'a> {
     pub fn superblock(&self) -> &SuperBlock {
         &self.sb
     }
+
+    pub fn fsbtodb(&self, fbno: usize) -> usize {
+        self.sb.fsbtodb(fbno)
+    }
+}
+
+#[derive(Debug)]
+pub enum Block {
+    Hole,
+    Sd(u32),
 }
 
 /// An in-memory representation of an inode, that associates the
@@ -490,23 +505,47 @@ impl<'a> Inode<'a> {
         Ok(0)
     }
 
-    /// Maps a block number relative
-    pub fn bmap(&self, off: u64) -> Option<u32> {
+    /// Maps a block number relative some offset in the filesystem
+    /// into a block number relative to the storage device.
+    pub fn bmap(&self, off: u64) -> Result<Block, ()> {
         let dinode = &self.dinode;
         let fs = &self.fs;
         let bn = fs.sb.lblkno(off) as usize;
         if bn < NDADDR {
-            return Some(dinode.dblocks[bn]);
+            return Ok(Block::Sd(dinode.dblocks[bn]));
         }
-        let bn = bn - NDADDR;
-/*
+        let nindir = fs.sb.nindir as usize;
+        let bsize = fs.sb.bsize as usize;
+        let mut bn = bn - NDADDR;
         let mut ni = 1;
-        for k in 1..=NIADDR {
-            let k = k as u32;
-            ni *= fs.sb.nindir * k;
-            println!("ni = {ni}");
+        let mut nib = 0;
+        while nib < NIADDR {
+            ni *= nindir;
+            if bn < ni {
+                break;
+            }
+            bn -= ni;
+            nib += 1;
         }
-*/
-        None
+        if nib == NIADDR {
+            // Too big.
+            return Err(());
+        }
+        let mut nb = self.dinode.iblocks[nib];
+        for _ in 0..=nib {
+            let dbindex = fs.fsbtodb(nb as usize);
+            if dbindex == 0 {
+                return Ok(Block::Hole);
+            }
+            ni /= nindir;
+            let dboff = (bn / ni) % nindir;
+            let dbaddr = (dbindex + dboff) * fs.sb.fragsize() as usize;
+            let bs = &fs.sd[dbaddr..dbaddr + 4];
+            nb = u32::from_ne_bytes([bs[0], bs[1], bs[2], bs[3]]);
+            if nb == 0 {
+                return Ok(Block::Hole);
+            }
+        }
+        Ok(Block::Sd(bn as u32))
     }
 }

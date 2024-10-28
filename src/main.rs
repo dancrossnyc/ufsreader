@@ -15,7 +15,10 @@ fn main() {
     let root_inode = fs.root_inode();
     println!(
         "root_inode at {offset:?}",
-        offset = root_inode.bmap(0).map(|v| v * fs.sb.fragsize() as u32)
+        offset = match root_inode.bmap(0).unwrap() {
+            ufs::Block::Sd(v) => v * fs.sb.fragsize() as u32,
+            ufs::Block::Hole => 0,
+        }
     );
     let _ = root_inode.bmap(1000000);
     let dbytes = root_inode.dinode.dbaddr(&fs.sb, 0).unwrap() as usize;

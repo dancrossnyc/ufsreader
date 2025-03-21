@@ -5,10 +5,15 @@
 //! ACM Transactions on Computer Systems 2, 3 (Aug. 1984),
 //! 181-197. https://doi.org/10.1145/989.990
 
-use std::fmt;
-use std::mem;
-use std::ops::Range;
-use std::ptr;
+use core::cmp;
+use core::fmt::{self, Write};
+use core::mem;
+use core::ops::Range;
+use core::ptr;
+
+use bitflags::bitflags;
+use bitstruct::bitstruct;
+use static_assertions::const_assert;
 
 /// The size of a "Device Block".  That is, the size of a
 /// physical block on the underlying storage device.
@@ -52,7 +57,7 @@ pub const MAX_MOUNT_LEN: usize = 512;
 pub const MAX_CKSUM_BUFS: usize = 32;
 
 /// Maximum logical block size.
-pub const MAX_BLOCK_SIZE: usize = 8192;
+pub const _MAX_BLOCK_SIZE: usize = 8192;
 
 /// Maximum number of fragments per block
 pub const MAX_FRAG: usize = 8;
@@ -69,8 +74,8 @@ pub struct CylGroupSummary {
 
 /// Whether the cylinder group summary in the superblock should
 /// be recalculated.
-pub const SI_OK: u32 = 0b00;
-pub const SI_BAD: u32 = 0b01;
+pub const _SI_OK: u32 = 0b00;
+pub const _SI_BAD: u32 = 0b01;
 
 /// Magic number identifying a UFS file system. Kirk's birthday?
 pub const MAGIC: u32 = 0x011954;
@@ -79,12 +84,12 @@ pub const _MTB_MAGIC: u32 = 0xdecade;
 
 /// An amount of time until a clean filesystem requires a mandatory
 /// fsck(8).
-pub const FSOKAY: u32 = 0x7c269d38;
+pub const _FSOKAY: u32 = 0x7c269d38;
 
 /// Valid states in the `clean` member of the superblock.
 #[repr(u8)]
 #[derive(Debug)]
-enum State {
+pub enum State {
     Active = 0,
     Clean = 1,
     Stable = 2,
@@ -94,10 +99,13 @@ enum State {
     Bad = 0xff,
 }
 
-/// Supported `flags` in the superblock.
-#[repr(u8)]
-enum Flags {
-    LargeFiles = 1,
+bitflags! {
+    /// Supported `flags` in the superblock.
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Flags: u8 {
+        const LARGE_FILES = 1;
+    }
 }
 
 /// Superblock.
@@ -156,7 +164,7 @@ pub struct SuperBlock {
     fpg: u32,                        // Fragments per group (num group blocks * frag size)
     cstotal: CylGroupSummary,        // Cylinder summary information
     sb_mod: u8,                      // Superblock modified flag
-    fs_clean: u8,                    // Filesystem state flag
+    clean: u8,                       // Filesystem state flag
     ronly: u8,                       // Mounted read-only
     flags: u8,                       // Bit mask of flags
     mountpt: [u8; MAX_MOUNT_LEN],    // Mount point
@@ -179,27 +187,16 @@ pub struct SuperBlock {
     magic: u32,                      // Kirk's birthday
 }
 
+const_assert!(core::mem::size_of::<SuperBlock>() <= SUPER_BLOCK_SIZE);
+
 impl SuperBlock {
     /// Returns the superblock, as "read" from the given "disk."
     pub fn read(disk: &[u8]) -> SuperBlock {
-        let p = disk
-            .as_ptr()
-            .wrapping_add(SUPER_BLOCK_OFFSET)
-            .cast::<SuperBlock>();
+        let sbb = &disk[SUPER_BLOCK_OFFSET..SUPER_BLOCK_OFFSET + SUPER_BLOCK_SIZE];
+        let p = sbb.as_ptr().cast::<SuperBlock>();
         let sb = unsafe { ptr::read_unaligned(p) };
         assert_eq!(sb.magic, MAGIC);
         sb
-    }
-
-    /// Returns the fragment size as a u64.
-    pub fn fragsize(&self) -> u64 {
-        self.fsize.into()
-    }
-
-    /// Returns the number of cylinder groups in the filesystem, as a Range,
-    /// starting at zero.
-    pub fn cgs(&self) -> Range<u32> {
-        0..self.ncg
     }
 
     /// Returns the block address of the given cylinder group, as
@@ -261,7 +258,7 @@ impl SuperBlock {
     /// Returns the offset of given inode, relative to the
     /// start of the storage area.
     pub fn inode_offset(&self, ino: u32) -> usize {
-        let ibase = u64::from(self.itod(ino)) * self.fragsize();
+        let ibase = u64::from(self.itod(ino)) * self.fsize as u64;
         let ioff = self.itoo(ino) as usize * mem::size_of::<DInode>();
         ibase as usize + ioff
     }
@@ -275,26 +272,46 @@ impl SuperBlock {
     pub fn fsbtodb(&self, fbno: usize) -> usize {
         fbno << self.fsbtodb as usize
     }
+
+    /// Returns the "clean" state of the filesystem.
+    pub fn state(&self) -> Result<State, ()> {
+        match self.clean {
+            0x00 => Ok(State::Active),
+            0x01 => Ok(State::Clean),
+            0x02 => Ok(State::Stable),
+            0xfc => Ok(State::Fix),
+            0xfd => Ok(State::Log),
+            0xfe => Ok(State::Suspend),
+            0xff => Ok(State::Bad),
+            _ => Err(()),
+        }
+    }
+
+    /// Returns the "Flags" for the filesystem.
+    pub fn flags(&self) -> Flags {
+        Flags::from_bits_truncate(self.flags)
+    }
 }
 
 /// Reclaim constants
-pub const RECLAIM: u32 = 0b0001;
-pub const RECLAIMING: u32 = 0b0010;
-pub const CHECK_CLEAN: u32 = 0b0100;
-pub const CHECK_RECLAIM: u32 = 0b1000;
+pub const _RECLAIM: u32 = 0b0001;
+pub const _RECLAIMING: u32 = 0b0010;
+pub const _CHECK_CLEAN: u32 = 0b0100;
+pub const _CHECK_RECLAIM: u32 = 0b1000;
 
 /// Rolled values.
-pub const PRE_FLAG: u32 = 0b00;
-pub const ALL_ROLLED: u32 = 0b01;
-pub const NEED_ROLL: u32 = 0b10;
+pub const _PRE_FLAG: u32 = 0b00;
+pub const _ALL_ROLLED: u32 = 0b01;
+pub const _NEED_ROLL: u32 = 0b10;
 
 /// Whether to optimize for space or time.
-pub const OPTTIME: u32 = 0b00;
-pub const OPTSPACE: u32 = 0b01;
+pub const _OPTTIME: u32 = 0b00;
+pub const _OPTSPACE: u32 = 0b01;
 
-pub const CG_MAGIC: u32 = 0x090255;
+pub const _CG_MAGIC: u32 = 0x090255;
 
 /// A Cylinder Group
+#[allow(dead_code)]
 #[repr(C)]
 #[derive(Debug)]
 pub struct CylGroup {
@@ -318,76 +335,6 @@ pub struct CylGroup {
     _resv: [u32; 16],       // Reserved
 }
 
-/// The maximum length of a name.
-pub const MAX_NAME_LEN: usize = 255;
-
-/// The in-memory representation of a directory entry.
-#[repr(C)]
-pub struct Dirent {
-    ino: u32,
-    reclen: u16,
-    namelen: u16,
-    name: [u8; MAX_NAME_LEN + 1],
-}
-
-impl Dirent {
-    pub const PREFIX_LEN: usize = 8;
-
-    pub fn dirsiz(&self) -> u16 {
-        const BASE_SIZE: usize = mem::size_of::<Dirent>() - MAX_NAME_LEN - 1; // c'mon dude; it's 264
-        let name_size = (self.namelen + 1 + 3) & !3;
-        BASE_SIZE as u16 + name_size
-    }
-
-    pub fn name(&self) -> &[u8] {
-        if let Some(nul) = self.name.iter().position(|&b| b == 0u8) {
-            &self.name[..nul]
-        } else {
-            &self.name[..]
-        }
-    }
-
-    pub fn first(buf: &[u8]) -> Option<(Dirent, &[u8])> {
-        if buf.len() < 8 {
-            return None;
-        }
-        let ino = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let reclen = u16::from_ne_bytes([buf[4], buf[5]]) as usize;
-        if reclen == 0 {
-            return None;
-        }
-        let namelen = u16::from_ne_bytes([buf[6], buf[7]]) as usize;
-        if reclen - Self::PREFIX_LEN < namelen
-            || buf.len() < reclen.into()
-            || namelen > MAX_NAME_LEN
-        {
-            return None;
-        }
-        let mut name = [0u8; MAX_NAME_LEN + 1];
-        let dst = &mut name[..namelen];
-        dst.copy_from_slice(&buf[Self::PREFIX_LEN..namelen + Self::PREFIX_LEN]);
-        let direct = Dirent {
-            ino,
-            reclen: reclen as u16,
-            namelen: namelen as u16,
-            name,
-        };
-        Some((direct, &buf[reclen..]))
-    }
-}
-
-impl fmt::Debug for Dirent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        writeln!(f, "Dirent {{")?;
-        writeln!(f, "    ino: {}", self.ino)?;
-        writeln!(f, "    reclen: {}", self.reclen)?;
-        writeln!(f, "    namelen: {}", self.namelen)?;
-        let name = unsafe { std::str::from_utf8_unchecked(&self.name[..self.namelen as usize]) };
-        writeln!(f, "    name = {name}")?;
-        write!(f, "}}")
-    }
-}
-
 /// The Root Inode Number
 ///
 /// Inode numbers are origin 1; 0 is the "unused" indicator.
@@ -409,7 +356,7 @@ const NIADDR: usize = 3; // Number of indirect block address in inode
 /// Fast symbolic links are an optimization where, if the filename the
 /// link points to is short enough, the target path name is stored
 /// directly in the inode itself.
-const FSL_SIZE: usize = (NDADDR + NIADDR - 1) * core::mem::size_of::<u32>();
+const _FSL_SIZE: usize = (NDADDR + NIADDR - 1) * core::mem::size_of::<u32>();
 
 /// The storage-resident version of an inode.
 #[repr(C, align(128))]
@@ -437,21 +384,6 @@ pub struct DInode {
     oeftflag: u32,          // 124: extended attr directory ino, 0 = none
 }
 
-impl DInode {
-    pub fn dbaddr(&self, sb: &SuperBlock, off: u64) -> Option<u64> {
-        let bno = sb.lblkno(off) as usize;
-        if bno < NDADDR {
-            return Some(u64::from(self.dblocks[bno]) * sb.fragsize());
-        }
-        let bno = bno - NDADDR;
-        None
-    }
-
-    pub fn len(&self) -> usize {
-        self.lsize as usize
-    }
-}
-
 #[derive(Debug)]
 pub struct FileSystem<'a> {
     sd: &'a [u8],
@@ -459,28 +391,192 @@ pub struct FileSystem<'a> {
 }
 
 impl<'a> FileSystem<'a> {
-    pub fn new(sd: &'a [u8]) -> FileSystem {
+    pub fn new(sd: &'a [u8]) -> FileSystem<'a> {
         let sb = SuperBlock::read(sd);
         FileSystem { sd, sb }
-    }
-
-    pub fn root_inode(&self) -> Inode {
-        Inode::new(self, ROOT_INODE).expect("root inode exists")
     }
 
     pub fn superblock(&self) -> &SuperBlock {
         &self.sb
     }
 
-    pub fn fsbtodb(&self, fbno: usize) -> usize {
+    pub fn root_inode(&self) -> Inode {
+        Inode::new(self, ROOT_INODE).expect("root inode exists")
+    }
+
+    pub fn inode(&self, ino: u32) -> Result<Inode, ()> {
+        Inode::new(self, ino)
+    }
+
+    pub fn fragsize(&self) -> usize {
+        self.sb.fsize as usize
+    }
+
+    /// Returns the disk block number of a fragment.
+    pub fn frags_to_sdblock(&self, fbno: usize) -> usize {
         self.sb.fsbtodb(fbno)
+    }
+
+    /// Returns the logical file block number for the given byte
+    /// offset.
+    pub fn logical_blockno(&self, offset: u64) -> usize {
+        self.sb.lblkno(offset) as usize
+    }
+
+    /// Returns the number of inodes per fragment.
+    #[allow(dead_code)]
+    pub fn inodes_per_frag(&self) -> usize {
+        self.sb.inopf() as usize
+    }
+
+    /// Returns the number of cylinder groups in the filesystem,
+    /// as a Range, starting at zero.
+    #[allow(dead_code)]
+    pub fn cylgroups(&self) -> Range<u32> {
+        0..self.sb.ncg
+    }
+
+    /// Returns the byte offset of the start of the data block
+    /// region for the given cylinder group.
+    #[allow(dead_code)]
+    pub fn cylgroup_data_offset(&self, cylgrp: u32) -> usize {
+        self.sb.cgdmin(cylgrp) as usize * self.fragsize()
+    }
+
+    /// Returns the number of indirect blocks spanned by a file
+    /// system block.
+    pub fn indir_span_per_block(&self) -> usize {
+        self.sb.nindir as usize
+    }
+
+    /// Returns the logical fragment number in a block for a given
+    /// file byte offset.
+    pub fn logical_block_fragno(&self, offset: u64) -> usize {
+        let offset = offset as usize;
+        (offset % self.blocksize()) / self.fragsize()
+    }
+
+    /// Returns a the block size of the filesystem.
+    pub fn blocksize(&self) -> usize {
+        self.sb.bsize as usize
     }
 }
 
-#[derive(Debug)]
-pub enum Block {
+#[derive(Clone, Copy, Debug)]
+pub enum Block<'a> {
     Hole,
-    Sd(u32),
+    Sd(&'a [u8]),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum FileType {
+    Unused = 0o00,
+    Fifo = 0o01,
+    Char = 0o02,
+    Dir = 0o04,
+    Block = 0o06,
+    Regular = 0o10,
+    SymLink = 0o12,
+    ShadowInode = 0o13,
+    Sock = 0o14,
+    AttrDir = 0o16,
+}
+
+impl FileType {
+    fn as_char(self) -> char {
+        match self {
+            FileType::Unused => 'X',
+            FileType::Fifo => 'p',
+            FileType::Char => 'c',
+            FileType::Dir => 'd',
+            FileType::Block => 'b',
+            FileType::Regular => '-',
+            FileType::SymLink => 'l',
+            FileType::ShadowInode => 'I',
+            FileType::Sock => 's',
+            FileType::AttrDir => 'A',
+        }
+    }
+}
+
+bitstruct! {
+    #[derive(Clone, Copy)]
+    pub struct Mode(u16) {
+        ox: bool = 0;
+        ow: bool = 1;
+        or: bool = 2;
+        gx: bool = 3;
+        gw: bool = 4;
+        gr: bool = 5;
+        ux: bool = 6;
+        uw: bool = 7;
+        ur: bool = 8;
+        sticky: bool = 9;
+        sgid: bool = 10;
+        suid: bool = 11;
+        typ: FileType = 12..=15;
+    }
+}
+
+impl bitstruct::FromRaw<u8, FileType> for Mode {
+    fn from_raw(raw: u8) -> FileType {
+        match raw {
+            0o01 => FileType::Fifo,
+            0o02 => FileType::Char,
+            0o04 => FileType::Dir,
+            0o06 => FileType::Block,
+            0o10 => FileType::Regular,
+            0o12 => FileType::SymLink,
+            0o13 => FileType::ShadowInode,
+            0o14 => FileType::Sock,
+            0o16 => FileType::AttrDir,
+            _ => FileType::Unused,
+        }
+    }
+}
+
+impl bitstruct::IntoRaw<u8, FileType> for Mode {
+    fn into_raw(bits: FileType) -> u8 {
+        bits as u8
+    }
+}
+
+impl fmt::Debug for Mode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fn alt(b: bool, t: char, f: char) -> char {
+            if b {
+                t
+            } else {
+                f
+            }
+        }
+        f.write_char(self.typ().as_char())?;
+        f.write_char(alt(self.ur(), 'r', '-'))?;
+        f.write_char(alt(self.uw(), 'w', '-'))?;
+        if !self.suid() {
+            f.write_char(alt(self.ux(), 'x', '-'))?;
+        } else {
+            f.write_char(alt(self.ux(), 's', 'S'))?;
+        }
+
+        f.write_char(alt(self.gr(), 'r', '-'))?;
+        f.write_char(alt(self.gw(), 'w', '-'))?;
+        if !self.sgid() {
+            f.write_char(alt(self.gx(), 'x', '-'))?;
+        } else {
+            f.write_char(alt(self.gx(), 's', 'S'))?;
+        }
+
+        f.write_char(alt(self.or(), 'r', '-'))?;
+        f.write_char(alt(self.ow(), 'w', '-'))?;
+        if !self.sticky() {
+            f.write_char(alt(self.ox(), 'x', '-'))?;
+        } else {
+            f.write_char(alt(self.ox(), 't', 'T'))?;
+        }
+        Ok(())
+    }
 }
 
 /// An in-memory representation of an inode, that associates the
@@ -493,59 +589,226 @@ pub struct Inode<'a> {
 
 impl<'a> Inode<'a> {
     /// Returns a new inode from the given filesystem.
-    pub fn new(fs: &'a FileSystem<'a>, ino: u32) -> Result<Inode, ()> {
+    pub fn new(fs: &'a FileSystem<'a>, ino: u32) -> Result<Inode<'a>, ()> {
         let inoff = fs.sb.inode_offset(ino);
         let p = fs.sd.as_ptr().wrapping_add(inoff).cast::<DInode>();
         let dinode = unsafe { ptr::read_unaligned(p) };
         Ok(Inode { dinode, fs })
     }
 
-    /// Reads from an inode.
-    pub fn read(&self, off: u64, buf: &mut [u8]) -> Result<usize, ()> {
-        Ok(0)
+    /// Returns the size of the file that this inode refers to.
+    pub fn size(&self) -> usize {
+        self.dinode.lsize as usize
     }
 
-    /// Maps a block number relative some offset in the filesystem
-    /// into a block number relative to the storage device.
-    pub fn bmap(&self, off: u64) -> Result<Block, ()> {
-        let dinode = &self.dinode;
-        let fs = &self.fs;
-        let bn = fs.sb.lblkno(off) as usize;
-        if bn < NDADDR {
-            return Ok(Block::Sd(dinode.dblocks[bn]));
+    /// Reads from an inode.
+    pub fn read(&self, off: u64, buf: &mut [u8]) -> Result<usize, ()> {
+        let mut off = off as usize;
+        if off > MAX_OFFSET {
+            return Err(());
         }
-        let nindir = fs.sb.nindir as usize;
-        let bsize = fs.sb.bsize as usize;
-        let mut bn = bn - NDADDR;
-        let mut ni = 1;
-        let mut nib = 0;
-        while nib < NIADDR {
-            ni *= nindir;
-            if bn < ni {
+        if off > self.size() {
+            return Ok(0);
+        }
+        let fragsize = self.fs.fragsize();
+        let n = core::cmp::min(buf.len(), self.size() - off);
+        let mut nread = 0;
+        while nread < n {
+            let frag_off: usize = off % fragsize;
+            let m = cmp::min(n - nread, fragsize - frag_off);
+            match self.bmap(off as u64)? {
+                Block::Hole => {
+                    buf[nread..nread + m].fill(0);
+                }
+                Block::Sd(bs) => {
+                    buf[nread..nread + m].copy_from_slice(&bs[frag_off..frag_off + m]);
+                }
+            }
+            off += m;
+            nread += m;
+        }
+        Ok(n)
+    }
+
+    pub fn nlink(&self) -> u16 {
+        self.dinode.nlink
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.dinode.uid
+    }
+
+    pub fn gid(&self) -> u32 {
+        self.dinode.gid
+    }
+
+    /// Maps a byte offset in some file into a fragment-sized block
+    /// from the the storage device.
+    pub fn bmap(&self, off: u64) -> Result<Block, ()> {
+        let fs = self.fs;
+        let lbn = fs.logical_blockno(off) as usize;
+        if lbn < NDADDR {
+            let sdbn = self.dinode.dblocks[lbn] as usize;
+            let offset = (sdbn + fs.logical_block_fragno(off)) * fs.fragsize();
+            return Ok(Block::Sd(&fs.sd[offset..offset + fs.fragsize()]));
+        }
+        let mut lbn = lbn - NDADDR;
+        let mut indir_span = 1;
+        let mut indir_depth = 0;
+        while indir_depth < NIADDR {
+            indir_span *= fs.indir_span_per_block();
+            if lbn < indir_span {
                 break;
             }
-            bn -= ni;
-            nib += 1;
+            lbn -= indir_span;
+            indir_depth += 1;
         }
-        if nib == NIADDR {
+        if indir_depth == NIADDR {
             // Too big.
             return Err(());
         }
-        let mut nb = self.dinode.iblocks[nib];
-        for _ in 0..=nib {
-            let dbindex = fs.fsbtodb(nb as usize);
-            if dbindex == 0 {
+        let mut nb = self.dinode.iblocks[indir_depth];
+        for _ in 0..=indir_depth {
+            let dblockno = fs.frags_to_sdblock(nb as usize);
+            if dblockno == 0 {
                 return Ok(Block::Hole);
             }
-            ni /= nindir;
-            let dboff = (bn / ni) % nindir;
-            let dbaddr = (dbindex + dboff) * fs.sb.fragsize() as usize;
+            indir_span /= fs.indir_span_per_block();
+            let dboff = (lbn / indir_span) % fs.indir_span_per_block();
+            let dbaddr = dblockno * DEV_BLOCK_SIZE + dboff * 4;
             let bs = &fs.sd[dbaddr..dbaddr + 4];
             nb = u32::from_ne_bytes([bs[0], bs[1], bs[2], bs[3]]);
             if nb == 0 {
                 return Ok(Block::Hole);
             }
         }
-        Ok(Block::Sd(bn as u32))
+        let sdbn = nb as usize;
+        let offset = (sdbn + fs.logical_block_fragno(off)) * fs.fragsize();
+        Ok(Block::Sd(&self.fs.sd[offset..offset + fs.fragsize()]))
+    }
+
+    pub fn mode(&self) -> Mode {
+        Mode(self.dinode.smode)
     }
 }
+
+mod dir {
+    use super::{FileType, Inode};
+    use core::fmt;
+    use core::mem;
+
+    /// The maximum length of a name.
+    pub const MAX_NAME_LEN: usize = 255;
+
+    // Legnth of a diretory prefix (before the name).
+    pub const PREFIX_LEN: usize = 8;
+
+    pub struct Directory<'a> {
+        pub(super) inode: Inode<'a>,
+    }
+
+    impl<'a> Directory<'a> {
+        pub fn new(inode: Inode<'a>) -> Directory<'a> {
+            let mode = inode.mode();
+            assert_eq!(mode.typ(), FileType::Dir);
+            Directory { inode }
+        }
+
+        pub fn iter(&self) -> Iter<'_> {
+            Iter::new(&self)
+        }
+    }
+
+    pub struct Iter<'a> {
+        dir: &'a super::Directory<'a>,
+        pos: u64,
+    }
+
+    impl<'a> Iter<'a> {
+        pub fn new(dir: &'a Directory<'a>) -> Iter<'a> {
+            let pos = 0;
+            Iter { dir, pos }
+        }
+    }
+
+    impl<'a> Iterator for Iter<'a> {
+        type Item = Entry;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let mut buf = [0u8; PREFIX_LEN];
+            let nread = self.dir.inode.read(self.pos, &mut buf).ok()?;
+            if nread < PREFIX_LEN {
+                return None;
+            }
+            let ino = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let reclen = u16::from_ne_bytes([buf[4], buf[5]]) as usize;
+            if reclen == 0 {
+                return None;
+            }
+            let namelen = u16::from_ne_bytes([buf[6], buf[7]]) as usize;
+            if reclen - PREFIX_LEN < namelen || namelen > MAX_NAME_LEN {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME_LEN + 1];
+            let dst = &mut name[..namelen];
+            let namepos = self.pos + PREFIX_LEN as u64;
+            let nread = self.dir.inode.read(namepos, dst).ok()?;
+            if nread != namelen {
+                return None;
+            }
+            let entry = Entry {
+                ino,
+                reclen: reclen as u16,
+                namelen: namelen as u16,
+                name,
+            };
+            self.pos += reclen as u64;
+            Some(entry)
+        }
+    }
+
+    /// The in-memory representation of a directory entry.
+    #[repr(C)]
+    pub struct Entry {
+        ino: u32,
+        reclen: u16,
+        namelen: u16,
+        name: [u8; MAX_NAME_LEN + 1],
+    }
+
+    impl Entry {
+        pub fn dirsiz(&self) -> u16 {
+            const BASE_SIZE: usize = mem::size_of::<Entry>() - MAX_NAME_LEN - 1; // c'mon dude; it's 264
+            let name_size = (self.namelen + 1 + 3) & !3;
+            BASE_SIZE as u16 + name_size
+        }
+
+        pub fn name(&self) -> &[u8] {
+            let name = &self.name[..self.namelen as usize];
+            if let Some(nul) = name.iter().position(|&b| b == 0u8) {
+                &name[..nul]
+            } else {
+                name
+            }
+        }
+
+        pub fn ino(&self) -> u32 {
+            self.ino
+        }
+    }
+
+    impl fmt::Debug for Entry {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+            writeln!(f, "Entry {{")?;
+            writeln!(f, "    size: {}", self.dirsiz())?;
+            writeln!(f, "    ino: {}", self.ino)?;
+            writeln!(f, "    reclen: {}", self.reclen)?;
+            writeln!(f, "    namelen: {}", self.namelen)?;
+            let name = unsafe { core::str::from_utf8_unchecked(self.name()) };
+            writeln!(f, "    name = {name}")?;
+            write!(f, "}}")
+        }
+    }
+}
+
+pub use dir::Directory;

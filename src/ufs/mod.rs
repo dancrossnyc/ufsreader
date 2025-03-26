@@ -460,6 +460,33 @@ impl<'a> FileSystem<'a> {
     pub fn blocksize(&self) -> usize {
         self.sb.bsize as usize
     }
+
+    /// Maps a file path name to an inode number.
+    pub fn namei(&self, mut path: &[u8]) -> Result<Inode, ()> {
+        // Split a '/' separated pathname into the first
+        // componenet and remainder.  If the path name is
+        // empty, or contains only '/'s, returns None.
+        fn next_component(path: &[u8]) -> Option<(&[u8], &[u8])> {
+            let begin = path.iter().position(|&b| b != b'/')?;
+            let end = path.len() - begin;
+            let end = path[begin..].iter().position(|&b| b == b'/').unwrap_or(end);
+            Some(path[begin..].split_at(end))
+        }
+        let mut ip: Inode<'_> = self.root_inode();
+        while let Some((dirname, next_path)) = next_component(path) {
+            if dirname.is_empty() {
+                break;
+            }
+            let dir = Directory::try_new(ip).ok_or(())?;
+            if let Some(entry) = dir.iter().find(|d| d.name() == dirname) {
+                ip = self.inode(entry.ino())?;
+            } else {
+                return Err(());
+            }
+            path = next_path;
+        }
+        Ok(ip)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -591,9 +618,9 @@ impl fmt::Debug for Mode {
 
 /// An in-memory representation of an inode, that associates the
 /// inode with the underlying filesystem it came from.
-#[derive(Debug)]
 pub struct Inode<'a> {
     pub dinode: DInode,
+    pub ino: u32,
     pub fs: &'a FileSystem<'a>,
 }
 
@@ -603,7 +630,7 @@ impl<'a> Inode<'a> {
         let inoff = fs.sb.inode_offset(ino);
         let p = fs.sd.as_ptr().wrapping_add(inoff).cast::<DInode>();
         let dinode = unsafe { ptr::read_unaligned(p) };
-        Ok(Inode { dinode, fs })
+        Ok(Inode { dinode, ino, fs })
     }
 
     /// Returns the size of the file that this inode refers to.
@@ -699,6 +726,14 @@ impl<'a> Inode<'a> {
 
     pub fn mode(&self) -> Mode {
         Mode(self.dinode.smode)
+    }
+}
+
+impl fmt::Debug for Inode<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_fmt(format_args!("INODE: {} ({:?})\n", self.ino, self.mode()))?;
+        f.write_fmt(format_args!("{:#x?}", self.dinode))?;
+        Ok(())
     }
 }
 

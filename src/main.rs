@@ -36,8 +36,7 @@ fn main() {
     dump_dir(&fs, &amd64dir);
 
     let genunix_inode = fs.inode(239).expect("/kernel/amd64/genunix exists");
-    println!("/kernel/amd64/genunix mode: {:?}", genunix_inode.mode());
-    println!("genunix inode: {:#x?}", genunix_inode.dinode);
+    println!("genunix inode: {:#x?}", genunix_inode);
     let mut genunixfile = vec![0u8; genunix_inode.size()];
     genunix_inode
         .read(0, &mut genunixfile)
@@ -79,11 +78,9 @@ fn main() {
     dump_dir(&fs, &amd64dir);
 
     let unix_inode = fs
-        .inode(607)
+        .namei(b"/platform/oxide/kernel/amd64/unix")
         .expect("/platform/oxide/kernel/amd64/unix exists");
-    println!("unix is {} bytes long", unix_inode.size());
-    println!("Unix inode: {:#x?}", unix_inode.dinode);
-    println!("unix mode: {:?}", unix_inode.mode());
+    println!("unix: {:#x?}", unix_inode);
     let mut unixfile = vec![0u8; unix_inode.size()];
     unix_inode
         .read(0, &mut unixfile)
@@ -92,9 +89,9 @@ fn main() {
 }
 
 fn dump_dir(fs: &ufs::FileSystem<'_>, dir: &ufs::Directory<'_>) {
-    for dentry in dir.iter() {
-        println!("dir: {dentry:#?}");
-    }
+    // for dentry in dir.iter() {
+    //     println!("dir: {dentry:#?}");
+    // }
     for dentry in dir.iter() {
         let file = fs.inode(dentry.ino()).expect("got file");
         println!(
@@ -112,7 +109,7 @@ fn dump_dir(fs: &ufs::FileSystem<'_>, dir: &ufs::Directory<'_>) {
 fn dump_file(name: &str, file: &[u8]) {
     use std::fs::File;
     use std::io::prelude::*;
-    println!("file contents: (size = {})", file.len());
     let mut f = File::create(name).expect("created {name}");
     f.write_all(file).expect("wrote {name}");
+    println!("dumped '{name}' (size: {size})", size = file.len());
 }

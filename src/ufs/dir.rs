@@ -19,6 +19,11 @@ impl<'a> Directory<'a> {
         Directory { inode }
     }
 
+    pub fn try_new(inode: Inode<'a>) -> Option<Directory<'a>> {
+        let isdir = inode.mode().typ() == FileType::Dir;
+        isdir.then(|| Self::new(inode))
+    }
+
     pub fn iter(&self) -> Iter<'_> {
         Iter::new(&self)
     }

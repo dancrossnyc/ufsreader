@@ -468,19 +468,29 @@ pub enum Block<'a> {
     Sd(&'a [u8]),
 }
 
+const IFIFO: u8 = 0o01;
+const IFCHR: u8 = 0o02;
+const IFDIR: u8 = 0o04;
+const IFBLK: u8 = 0o06;
+const IFREG: u8 = 0o10;
+const IFLNK: u8 = 0o12;
+const IFSHAD: u8 = 0o13;
+const IFSOCK: u8 = 0o14;
+const IFATTRDIR: u8 = 0o16;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum FileType {
-    Unused = 0o00,
-    Fifo = 0o01,
-    Char = 0o02,
-    Dir = 0o04,
-    Block = 0o06,
-    Regular = 0o10,
-    SymLink = 0o12,
-    ShadowInode = 0o13,
-    Sock = 0o14,
-    AttrDir = 0o16,
+    Unused = 0,
+    Fifo = IFIFO,
+    Char = IFCHR,
+    Dir = IFDIR,
+    Block = IFBLK,
+    Regular = IFREG,
+    SymLink = IFLNK,
+    ShadowInode = IFSHAD,
+    Sock = IFSOCK,
+    AttrDir = IFATTRDIR,
 }
 
 impl FileType {
@@ -522,15 +532,15 @@ bitstruct! {
 impl bitstruct::FromRaw<u8, FileType> for Mode {
     fn from_raw(raw: u8) -> FileType {
         match raw {
-            0o01 => FileType::Fifo,
-            0o02 => FileType::Char,
-            0o04 => FileType::Dir,
-            0o06 => FileType::Block,
-            0o10 => FileType::Regular,
-            0o12 => FileType::SymLink,
-            0o13 => FileType::ShadowInode,
-            0o14 => FileType::Sock,
-            0o16 => FileType::AttrDir,
+            IFIFO => FileType::Fifo,
+            IFCHR => FileType::Char,
+            IFDIR => FileType::Dir,
+            IFBLK => FileType::Block,
+            IFREG => FileType::Regular,
+            IFLNK => FileType::SymLink,
+            IFSHAD => FileType::ShadowInode,
+            IFSOCK => FileType::Sock,
+            IFATTRDIR => FileType::AttrDir,
             _ => FileType::Unused,
         }
     }
@@ -692,123 +702,6 @@ impl<'a> Inode<'a> {
     }
 }
 
-mod dir {
-    use super::{FileType, Inode};
-    use core::fmt;
-    use core::mem;
-
-    /// The maximum length of a name.
-    pub const MAX_NAME_LEN: usize = 255;
-
-    // Legnth of a diretory prefix (before the name).
-    pub const PREFIX_LEN: usize = 8;
-
-    pub struct Directory<'a> {
-        pub(super) inode: Inode<'a>,
-    }
-
-    impl<'a> Directory<'a> {
-        pub fn new(inode: Inode<'a>) -> Directory<'a> {
-            let mode = inode.mode();
-            assert_eq!(mode.typ(), FileType::Dir);
-            Directory { inode }
-        }
-
-        pub fn iter(&self) -> Iter<'_> {
-            Iter::new(&self)
-        }
-    }
-
-    pub struct Iter<'a> {
-        dir: &'a super::Directory<'a>,
-        pos: u64,
-    }
-
-    impl<'a> Iter<'a> {
-        pub fn new(dir: &'a Directory<'a>) -> Iter<'a> {
-            let pos = 0;
-            Iter { dir, pos }
-        }
-    }
-
-    impl<'a> Iterator for Iter<'a> {
-        type Item = Entry;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            let mut buf = [0u8; PREFIX_LEN];
-            let nread = self.dir.inode.read(self.pos, &mut buf).ok()?;
-            if nread < PREFIX_LEN {
-                return None;
-            }
-            let ino = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
-            let reclen = u16::from_ne_bytes([buf[4], buf[5]]) as usize;
-            if reclen == 0 {
-                return None;
-            }
-            let namelen = u16::from_ne_bytes([buf[6], buf[7]]) as usize;
-            if reclen - PREFIX_LEN < namelen || namelen > MAX_NAME_LEN {
-                return None;
-            }
-            let mut name = [0u8; MAX_NAME_LEN + 1];
-            let dst = &mut name[..namelen];
-            let namepos = self.pos + PREFIX_LEN as u64;
-            let nread = self.dir.inode.read(namepos, dst).ok()?;
-            if nread != namelen {
-                return None;
-            }
-            let entry = Entry {
-                ino,
-                reclen: reclen as u16,
-                namelen: namelen as u16,
-                name,
-            };
-            self.pos += reclen as u64;
-            Some(entry)
-        }
-    }
-
-    /// The in-memory representation of a directory entry.
-    #[repr(C)]
-    pub struct Entry {
-        ino: u32,
-        reclen: u16,
-        namelen: u16,
-        name: [u8; MAX_NAME_LEN + 1],
-    }
-
-    impl Entry {
-        pub fn dirsiz(&self) -> u16 {
-            const BASE_SIZE: usize = mem::size_of::<Entry>() - MAX_NAME_LEN - 1; // c'mon dude; it's 264
-            let name_size = (self.namelen + 1 + 3) & !3;
-            BASE_SIZE as u16 + name_size
-        }
-
-        pub fn name(&self) -> &[u8] {
-            let name = &self.name[..self.namelen as usize];
-            if let Some(nul) = name.iter().position(|&b| b == 0u8) {
-                &name[..nul]
-            } else {
-                name
-            }
-        }
-
-        pub fn ino(&self) -> u32 {
-            self.ino
-        }
-    }
-
-    impl fmt::Debug for Entry {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-            writeln!(f, "Entry {{")?;
-            writeln!(f, "    size: {}", self.dirsiz())?;
-            writeln!(f, "    ino: {}", self.ino)?;
-            writeln!(f, "    reclen: {}", self.reclen)?;
-            writeln!(f, "    namelen: {}", self.namelen)?;
-            let name = unsafe { core::str::from_utf8_unchecked(self.name()) };
-            writeln!(f, "    name = {name}")?;
-            write!(f, "}}")
-        }
-    }
-}
+mod dir;
 
 pub use dir::Directory;

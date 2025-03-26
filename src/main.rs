@@ -25,6 +25,25 @@ fn main() {
     let rootdir = ufs::Directory::new(root_inode);
     dump_dir(&fs, &rootdir);
 
+    let kernel_inode = fs.inode(44).expect("/kernel exists");
+    println!("kernel mode: {:?}", kernel_inode.mode());
+    let kerneldir = ufs::Directory::new(kernel_inode);
+    dump_dir(&fs, &kerneldir);
+
+    let amd64_inode = fs.inode(45).expect("/kernel/amd64 exists");
+    println!("/kernel/amd64 mode: {:?}", amd64_inode.mode());
+    let amd64dir = ufs::Directory::new(amd64_inode);
+    dump_dir(&fs, &amd64dir);
+
+    let genunix_inode = fs.inode(239).expect("/kernel/amd64/genunix exists");
+    println!("/kernel/amd64/genunix mode: {:?}", genunix_inode.mode());
+    println!("genunix inode: {:#x?}", genunix_inode.dinode);
+    let mut genunixfile = vec![0u8; genunix_inode.size()];
+    genunix_inode
+        .read(0, &mut genunixfile)
+        .expect("read /kernel/amd64/genunix");
+    dump_file("target/tmp.genunix", &genunixfile);
+
     let etc_inode = fs.inode(13).expect("/etc exists");
     println!("etc mode: {:?}", etc_inode.mode());
     let etcdir = ufs::Directory::new(etc_inode);

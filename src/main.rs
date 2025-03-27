@@ -15,27 +15,23 @@ fn main() {
     println!("fs.flags = {:?}", fs.superblock().flags());
     let root_inode = fs.root_inode();
     println!("root mode: {:?}", root_inode.mode());
-    println!(
-        "root_inode directory contents at {offset:?}",
-        offset = match root_inode.bmap(0).unwrap() {
-            ufs::Block::Sd(v) => v.as_ptr().addr() - disk.as_ptr().addr(),
-            ufs::Block::Hole => 0,
-        }
-    );
+    println!("root inode: {:#x?}", root_inode);
     let rootdir = ufs::Directory::new(root_inode);
     dump_dir(&fs, &rootdir);
 
-    let kernel_inode = fs.inode(44).expect("/kernel exists");
+    let kernel_inode = fs.namei(b"/kernel").expect("/kernel exists");
     println!("kernel mode: {:?}", kernel_inode.mode());
     let kerneldir = ufs::Directory::new(kernel_inode);
     dump_dir(&fs, &kerneldir);
 
-    let amd64_inode = fs.inode(45).expect("/kernel/amd64 exists");
+    let amd64_inode = fs.namei(b"/kernel/amd64").expect("/kernel/amd64 exists");
     println!("/kernel/amd64 mode: {:?}", amd64_inode.mode());
     let amd64dir = ufs::Directory::new(amd64_inode);
     dump_dir(&fs, &amd64dir);
 
-    let genunix_inode = fs.inode(239).expect("/kernel/amd64/genunix exists");
+    let genunix_inode = fs
+        .namei(b"/kernel/amd64/genunix")
+        .expect("/kernel/amd64/genunix exists");
     println!("genunix inode: {:#x?}", genunix_inode);
     let mut genunixfile = vec![0u8; genunix_inode.size()];
     genunix_inode
@@ -43,36 +39,44 @@ fn main() {
         .expect("read /kernel/amd64/genunix");
     dump_file("target/tmp.genunix", &genunixfile);
 
-    let etc_inode = fs.inode(13).expect("/etc exists");
+    let etc_inode = fs.namei(b"/etc").expect("/etc exists");
     println!("etc mode: {:?}", etc_inode.mode());
     let etcdir = ufs::Directory::new(etc_inode);
     dump_dir(&fs, &etcdir);
 
-    let driver_aliases_inode = fs.inode(174).expect("/etc/driver.aliases exists");
+    let driver_aliases_inode = fs
+        .namei(b"/etc/driver_aliases")
+        .expect("/etc/driver_aliases exists");
     println!("driver_aliases mode: {:?}", driver_aliases_inode.mode());
     let mut driver_aliases_file = vec![0u8; driver_aliases_inode.size()];
     driver_aliases_inode
         .read(0, &mut driver_aliases_file)
-        .expect("read /etc/driver.aliases");
+        .expect("read /etc/driver_aliases");
     let da = unsafe { core::str::from_utf8_unchecked(&driver_aliases_file) };
-    println!("{da}");
+    println!("Driver aliases content: |{da}|");
 
-    let platform_inode = fs.inode(97).expect("/platform exists");
+    let platform_inode = fs.namei(b"/platform").expect("/platform exists");
     println!("platform mode: {:?}", platform_inode.mode());
     let platformdir = ufs::Directory::new(platform_inode);
     dump_dir(&fs, &platformdir);
 
-    let oxide_inode = fs.inode(98).expect("/platform/oxide exists");
+    let oxide_inode = fs
+        .namei(b"/platform/oxide")
+        .expect("/platform/oxide exists");
     println!("oxide mode: {:?}", oxide_inode.mode());
     let oxidedir = ufs::Directory::new(oxide_inode);
     dump_dir(&fs, &oxidedir);
 
-    let kernel_inode = fs.inode(99).expect("/platform/oxide/kernel exists");
+    let kernel_inode = fs
+        .namei(b"/platform/oxide/kernel")
+        .expect("/platform/oxide/kernel exists");
     println!("kernel mode: {:?}", kernel_inode.mode());
     let kerneldir = ufs::Directory::new(kernel_inode);
     dump_dir(&fs, &kerneldir);
 
-    let amd64_inode = fs.inode(100).expect("/platform/oxide/kernel/amd64 exists");
+    let amd64_inode = fs
+        .namei(b"/platform/oxide/kernel/amd64")
+        .expect("/platform/oxide/kernel/amd64 exists");
     println!("amd64 mode: {:?}", amd64_inode.mode());
     let amd64dir = ufs::Directory::new(amd64_inode);
     dump_dir(&fs, &amd64dir);
@@ -94,6 +98,7 @@ fn dump_dir(fs: &ufs::FileSystem<'_>, dir: &ufs::Directory<'_>) {
     // }
     for dentry in dir.iter() {
         let file = fs.inode(dentry.ino()).expect("got file");
+        let _ino = file.ino();
         println!(
             "{:?} {:<2} {:<3} {:<3} {:>8} {}",
             file.mode(),

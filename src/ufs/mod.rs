@@ -1,9 +1,40 @@
+//! This is an implementation of a subset of the read paths in
+//! the 4.2BSD "UFS" filesystem, as implemented in the illumos
+//! operating system.  This is suitable for extracting files
+//! from RAM disks, programmatically examining the directory
+//! hierarchy, and so forth.
+//!
+//! UFS was designed to maximize performance on spinning
+//! magnetic media (disks) when 3600 RPM was considered fast.
+//! Much of the design is consequently focused on locality
+//! within the device, and the ability to read large blocks of
+//! data in a single device request, while maintaining good
+//! utilization efficiency by minimizing internal fragmentation.
+//! The bulk of this work is reflected in the write paths, which
+//! we do not implement, but is implemented in terms of sectors,
+//! cylinders, rotational latency, and other physical artifacts
+//! of contemporary storage devices at the time the filesystem
+//! was first implemented.  It also changed the representation
+//! of directory entries, extending the traditional Unix format
+//! to permit file names up to 255 bytes.  To avoid wasting
+//! space for typically short file names, it introduced a
+//! variable length format directory entries.
+//!
+//! To minimize internal fragmentation, logical filesystem
+//! storage units fall into two categories: "Blocks", which are
+//! relatively large, power-of-two multiples of the device
+//! sector size that facilitate rapid transfer from a device,
+//! and "fragments", which are equal-sized portions of a block
+//! that can be used for the tail on short files.  Since we
+//! assume the backing device is really RAM, we "read" in units
+//! of "fragments", and ignore blocks for the most part.
+//!
 //! References:
 //!
-//! [McKus84] Marshall K McKusick, William N Joy, Samuel J Leffler,
-//! and Robert S Fabry. 1984. ``A Fast FileSystem for Unix''.
-//! ACM Transactions on Computer Systems 2, 3 (Aug. 1984),
-//! 181-197. https://doi.org/10.1145/989.990
+//! [McKus84] Marshall K McKusick, William N Joy, Samuel J
+//! Leffler, and Robert S Fabry. 1984. ``A Fast FileSystem for
+//! Unix''.  ACM Transactions on Computer Systems 2, 3 (Aug.
+//! 1984), 181-197. https://doi.org/10.1145/989.990
 
 use core::cmp;
 use core::fmt::{self, Write};
@@ -15,8 +46,21 @@ use bitflags::bitflags;
 use bitstruct::bitstruct;
 use static_assertions::const_assert;
 
+/// Various errors that can occur during filesystem
+/// operations.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Error {
+    BadPath,
+    FileNotFound,
+    OffsetTooBig,
+    _InodeNotFound,
+    InvalidFsState,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
 /// The size of a "Device Block".  That is, the size of a
-/// physical block on the underlying storage device.
+/// physical block on the underlying storage device, in bytes.
 pub const DEV_BLOCK_SIZE: usize = 512;
 
 /// Lg(DEV_BLOCK_SIZE)
@@ -82,8 +126,8 @@ pub const MAGIC: u32 = 0x011954;
 
 pub const _MTB_MAGIC: u32 = 0xdecade;
 
-/// An amount of time until a clean filesystem requires a mandatory
-/// fsck(8).
+/// The amount of time until a clean filesystem requires a
+/// mandatory fsck(8).
 pub const _FSOKAY: u32 = 0x7c269d38;
 
 /// Valid states in the `clean` member of the superblock.
@@ -110,7 +154,7 @@ bitflags! {
 
 /// Superblock.
 ///
-/// Most disk addresses are in fragments.
+/// "Disk" addresses are in fragments.
 /// Note that SVR4 reverses the `nspect` and `state_ts` fields.
 #[repr(C)]
 #[derive(Debug)]
@@ -274,7 +318,7 @@ impl SuperBlock {
     }
 
     /// Returns the "clean" state of the filesystem.
-    pub fn state(&self) -> Result<State, ()> {
+    pub fn state(&self) -> Result<State> {
         match self.clean {
             0x00 => Ok(State::Active),
             0x01 => Ok(State::Clean),
@@ -283,7 +327,7 @@ impl SuperBlock {
             0xfd => Ok(State::Log),
             0xfe => Ok(State::Suspend),
             0xff => Ok(State::Bad),
-            _ => Err(()),
+            _ => Err(Error::InvalidFsState),
         }
     }
 
@@ -404,7 +448,7 @@ impl<'a> FileSystem<'a> {
         Inode::new(self, ROOT_INODE).expect("root inode exists")
     }
 
-    pub fn inode(&self, ino: u32) -> Result<Inode, ()> {
+    pub fn inode(&self, ino: u32) -> Result<Inode> {
         Inode::new(self, ino)
     }
 
@@ -462,7 +506,7 @@ impl<'a> FileSystem<'a> {
     }
 
     /// Maps a file path name to an inode number.
-    pub fn namei(&self, mut path: &[u8]) -> Result<Inode, ()> {
+    pub fn namei(&self, mut path: &[u8]) -> Result<Inode> {
         // Split a '/' separated pathname into the first
         // componenet and remainder.  If the path name is
         // empty, or contains only '/'s, returns None.
@@ -477,11 +521,11 @@ impl<'a> FileSystem<'a> {
             if dirname.is_empty() {
                 break;
             }
-            let dir = Directory::try_new(ip).ok_or(())?;
+            let dir = Directory::try_new(ip).ok_or(Error::BadPath)?;
             if let Some(entry) = dir.iter().find(|d| d.name() == dirname) {
                 ip = self.inode(entry.ino())?;
             } else {
-                return Err(());
+                return Err(Error::FileNotFound);
             }
             path = next_path;
         }
@@ -489,12 +533,19 @@ impl<'a> FileSystem<'a> {
     }
 }
 
+/// A logical "block" of data from the disk.
+///
+/// Note that UFS supports "holes"; block-sized and aligned
+/// spans of bytes within a file that are all zeroes are
+/// specially marked, and not backed by allocated blocks.
 #[derive(Clone, Copy, Debug)]
 pub enum Block<'a> {
     Hole,
     Sd(&'a [u8]),
 }
 
+/// This block of constants provides the traditional Unix names
+/// for the various file types the filesystem recognizes.
 const IFIFO: u8 = 0o01;
 const IFCHR: u8 = 0o02;
 const IFDIR: u8 = 0o04;
@@ -505,6 +556,12 @@ const IFSHAD: u8 = 0o13;
 const IFSOCK: u8 = 0o14;
 const IFATTRDIR: u8 = 0o16;
 
+/// The type of file, taken from the inode.
+///
+/// Unix files can be one of a limited set of types; for
+/// instance, directories are a type of file.  The type
+/// is encoded in the mode field of the inode; these are
+/// the various types that are recognized.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum FileType {
@@ -521,6 +578,10 @@ pub enum FileType {
 }
 
 impl FileType {
+    /// Returns a single character that represents the file
+    /// type, such as 'd' for directories, or '-' for regular
+    /// files.  These are mostly the characters one would see in
+    /// the output of `ls -l`.
     fn as_char(self) -> char {
         match self {
             FileType::Unused => 'X',
@@ -538,6 +599,9 @@ impl FileType {
 }
 
 bitstruct! {
+    /// The parsed representation of the mode field from an
+    /// inode.  Note that each permission bit is broken out into
+    /// a separate field.
     #[derive(Clone, Copy)]
     pub struct Mode(u16) {
         ox: bool = 0;
@@ -579,6 +643,8 @@ impl bitstruct::IntoRaw<u8, FileType> for Mode {
     }
 }
 
+// The "Debug" output for a mode is meant to closely resemble
+// the first field in the output of `ls -l`.
 impl fmt::Debug for Mode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fn alt(b: bool, t: char, f: char) -> char {
@@ -617,7 +683,8 @@ impl fmt::Debug for Mode {
 }
 
 /// An in-memory representation of an inode, that associates the
-/// inode with the underlying filesystem it came from.
+/// inode with the underlying filesystem it came from and its
+/// inode number in that filesystem.
 pub struct Inode<'a> {
     pub dinode: DInode,
     pub ino: u32,
@@ -626,7 +693,7 @@ pub struct Inode<'a> {
 
 impl<'a> Inode<'a> {
     /// Returns a new inode from the given filesystem.
-    pub fn new(fs: &'a FileSystem<'a>, ino: u32) -> Result<Inode<'a>, ()> {
+    pub fn new(fs: &'a FileSystem<'a>, ino: u32) -> Result<Inode<'a>> {
         let inoff = fs.sb.inode_offset(ino);
         let p = fs.sd.as_ptr().wrapping_add(inoff).cast::<DInode>();
         let dinode = unsafe { ptr::read_unaligned(p) };
@@ -638,11 +705,33 @@ impl<'a> Inode<'a> {
         self.dinode.lsize as usize
     }
 
+    /// Returns the number of links to this file.
+    pub fn nlink(&self) -> u16 {
+        self.dinode.nlink
+    }
+
+    /// Returns the file's user owner ID.
+    pub fn uid(&self) -> u32 {
+        self.dinode.uid
+    }
+
+    /// Returns the file's group owner ID.
+    pub fn gid(&self) -> u32 {
+        self.dinode.gid
+    }
+
+    /// Returns the file's inode number.  Note that the inode
+    /// number is not part of the inode's on-disk
+    /// representation.
+    pub fn ino(&self) -> u32 {
+        self.ino
+    }
+
     /// Reads from an inode.
-    pub fn read(&self, off: u64, buf: &mut [u8]) -> Result<usize, ()> {
+    pub fn read(&self, off: u64, buf: &mut [u8]) -> Result<usize> {
         let mut off = off as usize;
         if off > MAX_OFFSET {
-            return Err(());
+            return Err(Error::OffsetTooBig);
         }
         if off > self.size() {
             return Ok(0);
@@ -667,21 +756,9 @@ impl<'a> Inode<'a> {
         Ok(n)
     }
 
-    pub fn nlink(&self) -> u16 {
-        self.dinode.nlink
-    }
-
-    pub fn uid(&self) -> u32 {
-        self.dinode.uid
-    }
-
-    pub fn gid(&self) -> u32 {
-        self.dinode.gid
-    }
-
     /// Maps a byte offset in some file into a fragment-sized block
     /// from the the storage device.
-    pub fn bmap(&self, off: u64) -> Result<Block, ()> {
+    fn bmap(&self, off: u64) -> Result<Block> {
         let fs = self.fs;
         let lbn = fs.logical_blockno(off) as usize;
         if lbn < NDADDR {
@@ -702,7 +779,7 @@ impl<'a> Inode<'a> {
         }
         if indir_depth == NIADDR {
             // Too big.
-            return Err(());
+            return Err(Error::OffsetTooBig);
         }
         let mut nb = self.dinode.iblocks[indir_depth];
         for _ in 0..=indir_depth {

@@ -14,13 +14,13 @@ pub const PREFIX_LEN: usize = 8;
 
 /// Newtype around an inode representing a directory file.
 pub struct Directory<'a> {
-    pub(super) inode: Inode<'a>,
+    pub(super) inode: &'a Inode<'a>,
 }
 
 impl<'a> Directory<'a> {
     /// Creates a new directory from the given inode. Asserts
     /// that the inode refers to a directory.
-    pub fn new(inode: Inode<'a>) -> Directory<'a> {
+    pub fn new(inode: &'a Inode<'a>) -> Directory<'a> {
         let mode = inode.mode();
         assert_eq!(mode.typ(), FileType::Dir);
         Directory { inode }
@@ -28,7 +28,7 @@ impl<'a> Directory<'a> {
 
     /// Tries to create a new `Dirctory`` from the given inode.
     /// Returns `None`` if the inode's type is not a directory.
-    pub fn try_new(inode: Inode<'a>) -> Option<Directory<'a>> {
+    pub fn try_new(inode: &'a Inode<'a>) -> Option<Directory<'a>> {
         let isdir = inode.mode().typ() == FileType::Dir;
         isdir.then(|| Self::new(inode))
     }

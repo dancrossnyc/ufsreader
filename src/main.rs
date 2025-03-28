@@ -20,17 +20,17 @@ fn main() {
     let root_inode = fs.root_inode();
     println!("root mode: {:?}", root_inode.mode());
     println!("root inode: {:#x?}", root_inode);
-    let rootdir = ufs::Directory::new(root_inode);
+    let rootdir = ufs::Directory::new(&root_inode);
     dump_dir(&fs, &rootdir);
 
     let kernel_inode = fs.namei(b"/kernel").expect("/kernel exists");
     println!("kernel mode: {:?}", kernel_inode.mode());
-    let kerneldir = ufs::Directory::new(kernel_inode);
+    let kerneldir = ufs::Directory::new(&kernel_inode);
     dump_dir(&fs, &kerneldir);
 
     let amd64_inode = fs.namei(b"/kernel/amd64").expect("/kernel/amd64 exists");
     println!("/kernel/amd64 mode: {:?}", amd64_inode.mode());
-    let amd64dir = ufs::Directory::new(amd64_inode);
+    let amd64dir = ufs::Directory::new(&amd64_inode);
     dump_dir(&fs, &amd64dir);
 
     let genunix_inode = fs
@@ -45,7 +45,7 @@ fn main() {
 
     let etc_inode = fs.namei(b"/etc").expect("/etc exists");
     println!("etc mode: {:?}", etc_inode.mode());
-    let etcdir = ufs::Directory::new(etc_inode);
+    let etcdir = ufs::Directory::new(&etc_inode);
     dump_dir(&fs, &etcdir);
 
     let driver_aliases_inode = fs
@@ -61,28 +61,28 @@ fn main() {
 
     let platform_inode = fs.namei(b"/platform").expect("/platform exists");
     println!("platform mode: {:?}", platform_inode.mode());
-    let platformdir = ufs::Directory::new(platform_inode);
+    let platformdir = ufs::Directory::new(&platform_inode);
     dump_dir(&fs, &platformdir);
 
     let oxide_inode = fs
         .namei(b"/platform/oxide")
         .expect("/platform/oxide exists");
     println!("oxide mode: {:?}", oxide_inode.mode());
-    let oxidedir = ufs::Directory::new(oxide_inode);
+    let oxidedir = ufs::Directory::new(&oxide_inode);
     dump_dir(&fs, &oxidedir);
 
     let kernel_inode = fs
         .namei(b"/platform/oxide/kernel")
         .expect("/platform/oxide/kernel exists");
     println!("kernel mode: {:?}", kernel_inode.mode());
-    let kerneldir = ufs::Directory::new(kernel_inode);
+    let kerneldir = ufs::Directory::new(&kernel_inode);
     dump_dir(&fs, &kerneldir);
 
     let amd64_inode = fs
         .namei(b"/platform/oxide/kernel/amd64")
         .expect("/platform/oxide/kernel/amd64 exists");
     println!("amd64 mode: {:?}", amd64_inode.mode());
-    let amd64dir = ufs::Directory::new(amd64_inode);
+    let amd64dir = ufs::Directory::new(&amd64_inode);
     dump_dir(&fs, &amd64dir);
 
     let unix_inode = fs
@@ -94,6 +94,9 @@ fn main() {
         .read(0, &mut unixfile)
         .expect("read /platform/oxide/kernel/amd64/unix");
     dump_file("target/tmp.unix", &unixfile);
+
+    let log_inode = fs.namei(b"/etc/TIMEZONE").expect("/etc/TIMEZONE exists");
+    println!("log: {log_inode:#x?}");
 }
 
 fn dump_dir(fs: &ufs::FileSystem<'_>, dir: &ufs::Directory<'_>) {
@@ -102,9 +105,9 @@ fn dump_dir(fs: &ufs::FileSystem<'_>, dir: &ufs::Directory<'_>) {
     // }
     for dentry in dir.iter() {
         let file = fs.inode(dentry.ino()).expect("got file");
-        let _ino = file.ino();
         println!(
-            "{:?} {:<2} {:<3} {:<3} {:>8} {}",
+            "#{:<4} {:?} {:<2} {:<3} {:<3} {:>8} {}",
+            file.ino(),
             file.mode(),
             file.nlink(),
             file.uid(),

@@ -510,7 +510,7 @@ impl<'a> FileSystem<'a> {
     }
 
     /// Maps a file path name to an inode number.
-    pub fn namei(&self, mut path: &[u8]) -> Result<Inode> {
+    fn namex(&'a self, mut ip: Inode<'a>, mut path: &[u8]) -> Result<Inode<'a>> {
         // Split a '/' separated pathname into the first
         // componenet and remainder.  If the path name is
         // empty, or contains only '/'s, returns None.
@@ -520,20 +520,29 @@ impl<'a> FileSystem<'a> {
             let end = path[begin..].iter().position(|&b| b == b'/').unwrap_or(end);
             Some(path[begin..].split_at(end))
         }
-        let mut ip: Inode<'_> = self.root_inode();
         while let Some((dirname, next_path)) = next_component(path) {
             if dirname.is_empty() {
                 break;
             }
-            let dir = Directory::try_new(ip).ok_or(Error::BadPath)?;
-            if let Some(entry) = dir.iter().find(|d| d.name() == dirname) {
-                ip = self.inode(entry.ino())?;
+            let dir = Directory::try_new(&ip).ok_or(Error::BadPath)?;
+            let mut tip = if let Some(entry) = dir.iter().find(|d| d.name() == dirname) {
+                self.inode(entry.ino())
             } else {
-                return Err(Error::FileNotFound);
+                Err(Error::FileNotFound)
+            }?;
+            if tip.file_type() == FileType::SymLink {
+                let mut lpath = vec![0u8; tip.size()];
+                tip.read(0, &mut lpath).expect("read symlink");
+                tip = self.namex(ip, &lpath)?;
             }
+            ip = tip;
             path = next_path;
         }
         Ok(ip)
+    }
+
+    pub fn namei(&self, path: &[u8]) -> Result<Inode> {
+        self.namex(self.root_inode(), path)
     }
 }
 
@@ -725,6 +734,11 @@ impl<'a> Inode<'a> {
     /// representation.
     pub fn ino(&self) -> u32 {
         self.ino
+    }
+
+    /// Returns the type of this file.
+    pub fn file_type(&self) -> FileType {
+        self.mode().typ()
     }
 
     /// Reads from an inode.

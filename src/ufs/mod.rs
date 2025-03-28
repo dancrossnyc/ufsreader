@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! This is an implementation of a subset of the read paths in
 //! the 4.2BSD "UFS" filesystem, as implemented in the illumos
 //! operating system.  This is suitable for extracting files
@@ -421,7 +425,7 @@ pub struct DInode {
     iblocks: [u32; NIADDR], // 88: indirect blocks
     flags: u32,             // 100: "cflags"
     blocks: u32,            // 104: Number 512 byte blocks actually used
-    gen: u32,               // 108: generation number
+    generation: u32,        // 108: generation number
     shadow: u32,            // 112: shadow inode
     uid: u32,               // 116: long EFT version of uid
     gid: u32,               // 120: long EFT version of gid
@@ -648,11 +652,7 @@ impl bitstruct::IntoRaw<u8, FileType> for Mode {
 impl fmt::Debug for Mode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fn alt(b: bool, t: char, f: char) -> char {
-            if b {
-                t
-            } else {
-                f
-            }
+            if b { t } else { f }
         }
         f.write_char(self.typ().as_char())?;
         f.write_char(alt(self.ur(), 'r', '-'))?;

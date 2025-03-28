@@ -8,45 +8,57 @@ pub const MAX_NAME_LEN: usize = 255;
 // Legnth of a diretory prefix (before the name).
 pub const PREFIX_LEN: usize = 8;
 
+/// Newtype around an inode representing a directory file.
 pub struct Directory<'a> {
     pub(super) inode: Inode<'a>,
 }
 
 impl<'a> Directory<'a> {
+    /// Creates a new directory from the given inode. Asserts
+    /// that the inode refers to a directory.
     pub fn new(inode: Inode<'a>) -> Directory<'a> {
         let mode = inode.mode();
         assert_eq!(mode.typ(), FileType::Dir);
         Directory { inode }
     }
 
+    /// Tries to create a new `Dirctory`` from the given inode.
+    /// Returns `None`` if the inode's type is not a directory.
     pub fn try_new(inode: Inode<'a>) -> Option<Directory<'a>> {
         let isdir = inode.mode().typ() == FileType::Dir;
         isdir.then(|| Self::new(inode))
     }
 
+    /// Returns an interator over the directory entries in this
+    /// directory.
     pub fn iter(&self) -> Iter<'_> {
-        Iter::new(&self)
+        Iter::new(self)
     }
 }
 
+/// A directory entry iterator.  Iterates over the directory
+/// entries in the given directory.
 pub struct Iter<'a> {
-    dir: &'a super::Directory<'a>,
+    inode: &'a Inode<'a>,
     pos: u64,
 }
 
 impl<'a> Iter<'a> {
+    /// Creates a new directory entry iterator for the given
+    /// directory.
     pub fn new(dir: &'a Directory<'a>) -> Iter<'a> {
         let pos = 0;
-        Iter { dir, pos }
+        let inode = &dir.inode;
+        Iter { inode, pos }
     }
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl Iterator for Iter<'_> {
     type Item = Entry;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut buf = [0u8; PREFIX_LEN];
-        let nread = self.dir.inode.read(self.pos, &mut buf).ok()?;
+        let nread = self.inode.read(self.pos, &mut buf).ok()?;
         if nread < PREFIX_LEN {
             return None;
         }
@@ -62,7 +74,7 @@ impl<'a> Iterator for Iter<'a> {
         let mut name = [0u8; MAX_NAME_LEN + 1];
         let dst = &mut name[..namelen];
         let namepos = self.pos + PREFIX_LEN as u64;
-        let nread = self.dir.inode.read(namepos, dst).ok()?;
+        let nread = self.inode.read(namepos, dst).ok()?;
         if nread != namelen {
             return None;
         }
@@ -87,12 +99,14 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Returns the size of this entry.
     pub fn dirsiz(&self) -> u16 {
         const BASE_SIZE: usize = mem::size_of::<Entry>() - MAX_NAME_LEN - 1; // c'mon dude; it's 264
         let name_size = (self.namelen + 1 + 3) & !3;
         BASE_SIZE as u16 + name_size
     }
 
+    /// Returns the file name contained in this directory entry.
     pub fn name(&self) -> &[u8] {
         let name = &self.name[..self.namelen as usize];
         if let Some(nul) = name.iter().position(|&b| b == 0u8) {
@@ -102,6 +116,7 @@ impl Entry {
         }
     }
 
+    /// Returns the inode number for this directory entry.
     pub fn ino(&self) -> u32 {
         self.ino
     }

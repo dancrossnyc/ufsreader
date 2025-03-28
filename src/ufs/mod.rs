@@ -92,7 +92,7 @@ pub const NBBY: usize = 8;
 pub const FILE_SIZE_BITS: usize = NBBY * core::mem::size_of::<u32>() + DEV_BIT_SHIFT;
 
 /// Maximum offset mask.
-pub const MAX_OFFSET: usize = 1 << (FILE_SIZE_BITS - 1) - 1;
+pub const MAX_OFFSET: usize = (1 << (FILE_SIZE_BITS - 1)) - 1;
 
 /// Maximum mount point length
 pub const MAX_MOUNT_LEN: usize = 512;
@@ -760,7 +760,7 @@ impl<'a> Inode<'a> {
     /// from the the storage device.
     fn bmap(&self, off: u64) -> Result<Block> {
         let fs = self.fs;
-        let lbn = fs.logical_blockno(off) as usize;
+        let lbn = fs.logical_blockno(off);
         if lbn < NDADDR {
             let sdbn = self.dinode.dblocks[lbn] as usize;
             let offset = (sdbn + fs.logical_block_fragno(off)) * fs.fragsize();
